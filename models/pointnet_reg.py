@@ -69,13 +69,13 @@ def get_model(point_cloud, is_training, bn_decay=None):
                           scope='dp2')
     net = tf_util.fully_connected(net, 1, activation_fn=None, scope='fc3')
 
-    return net, end_points
+    return tf.squeeze(net), end_points
 
 
 def get_loss(pred, distances, end_points, reg_weight=0.001):
     """ pred:  B,
         label: B, """
-    regression_loss = tf.losses.mean_squared_error(labels=label, predictions=pred)
+    regression_loss = tf.losses.mean_squared_error(labels=distances, predictions=pred)
     tf.summary.scalar('regression loss', regression_loss)
 
     # Enforce the transformation as orthogonal matrix

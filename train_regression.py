@@ -1,3 +1,5 @@
+#! /usr/bin/env python
+
 import argparse
 import math
 import h5py
@@ -39,10 +41,9 @@ DECAY_STEP = FLAGS.decay_step
 DECAY_RATE = FLAGS.decay_rate
 
 MODEL = importlib.import_module('pointnet_reg') # import network module
-MODEL_FILE = os.path.join(BASE_DIR, 'models', FLAGS.model+'.py')
 LOG_DIR = FLAGS.log_dir
 if not os.path.exists(LOG_DIR): os.mkdir(LOG_DIR)
-os.system('cp %s %s' % (MODEL_FILE, LOG_DIR)) # bkp of model def
+os.system('cp ./models/pointnet_reg.py %s' % (LOG_DIR)) # bkp of model def
 os.system('cp train_regression.py %s' % (LOG_DIR)) # bkp of train procedure
 LOG_FOUT = open(os.path.join(LOG_DIR, 'log_train.txt'), 'w')
 LOG_FOUT.write(str(FLAGS)+'\n')
@@ -89,7 +90,9 @@ def get_bn_decay(batch):
 def train():
     with tf.Graph().as_default():
         with tf.device('/gpu:'+str(GPU_INDEX)):
-            pointclouds_pl, distance_pl = MODEL.placeholder_inputs(BATCH_SIZE, NUM_POINT)
+            #train data from tfrecord
+            train_points, train_distances = provider.read(TRAIN_FILES, num_epochs=MAX_EPOCH, batch_size=BATCH_SIZE, num_points=NUM_POINT)        
+
             is_training_pl = tf.placeholder(tf.bool, shape=())
             print(is_training_pl)
             
@@ -100,8 +103,8 @@ def train():
             tf.summary.scalar('bn_decay', bn_decay)
 
             # Get model and loss 
-            pred, end_points = MODEL.get_model(pointclouds_pl, is_training_pl, bn_decay=bn_decay)
-            loss = MODEL.get_loss(pred, distance_pl, end_points)
+            pred, end_points = MODEL.get_model(train_points, is_training_pl, bn_decay=bn_decay)
+            loss = MODEL.get_loss(pred, train_distances, end_points)
             tf.summary.scalar('loss', loss)
 
             # Get training operator
@@ -122,6 +125,7 @@ def train():
         config.allow_soft_placement = True
         config.log_device_placement = False
         sess = tf.Session(config=config)
+        sess.as_default()
 
         # Add summary writers
         #merged = tf.merge_all_summaries()
@@ -130,46 +134,49 @@ def train():
                                   sess.graph)
         test_writer = tf.summary.FileWriter(os.path.join(LOG_DIR, 'test'))
 
-        #train data from tfrecord
-        train_points, train_distances = provider.read(TRAIN_FILES)        
-
         # Init variables
         init = tf.global_variables_initializer()
+        local_init_op = tf.local_variables_initializer()
+
         # To fix the bug introduced in TF 0.12.1 as in
         # http://stackoverflow.com/questions/41543774/invalidargumenterror-for-tensor-bool-tensorflow-0-12-1
         #sess.run(init)
         sess.run(init, {is_training_pl: True})
+        sess.run(local_init_op)
+        
+        coord = tf.train.Coordinator()
+        threads = tf.train.start_queue_runners(coord=coord, sess=sess)
 
-        ops = {'pointclouds_pl': pointclouds_pl,
-               'distance_pl': distance_pl,
-               'is_training_pl': is_training_pl,
+        ops = {'is_training_pl': is_training_pl,
                'pred': pred,
                'loss': loss,
                'train_op': train_op,
                'merged': merged,
                'step': batch}
 
+        step = 0
+        try:
+            while True:
+                l = train_one(sess, ops, train_writer)
+                if step % 1000 == 0:
+                    save_path = saver.save(sess, os.path.join(LOG_DIR, "model.ckpt"))
+                    log_string("Model saved in file: %s" % save_path)
+                step += 1
+        except:
+            log_string("Done")
 
-        for step in range(1000):
-            train_one(sess, ops, train_writer, train_points, train_distances)
-            if step % 100 == 0:
-                save_path = saver.save(sess, os.path.join(LOG_DIR, "model.ckpt"))
-                log_string("Model saved in file: %s" % save_path)
+        coord.request_stop()
+        coord.join(threads)
 
 
-
-def train_one(sess, ops, train_writer, cloud, distance):
+def train_one(sess, ops, train_writer):
     """ ops: dict mapping from string to tf ops """
     is_training = True
     
-    feed_dict = {ops['pointclouds_pl']: cloud,
-                 ops['distance_pl']: distance,
-                 ops['is_training_pl']: is_training,}
+    feed_dict = {ops['is_training_pl']: is_training,}
     summary, step, _, loss_val, pred_val = sess.run([ops['merged'], ops['step'],
         ops['train_op'], ops['loss'], ops['pred']], feed_dict=feed_dict)
     train_writer.add_summary(summary, step)
-    pred_val = np.argmax(pred_val, 1)
-    correct = np.sum(pred_val == current_label[start_idx:end_idx])
     
     return loss_val
 
