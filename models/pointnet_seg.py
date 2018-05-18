@@ -14,7 +14,8 @@ def placeholder_inputs(batch_size, num_point):
                                      shape=(batch_size, num_point, 3))
     labels_pl = tf.placeholder(tf.int32,
                                 shape=(batch_size, num_point))
-    return pointclouds_pl, labels_pl
+    mask_pl = tf.placeholder(tf.int32, shape=(batch_size, num_point))
+    return pointclouds_pl, labels_pl, mask_pl
 
 
 def get_model(point_cloud, is_training, bn_decay=None):
@@ -61,7 +62,7 @@ def get_model(point_cloud, is_training, bn_decay=None):
     print(global_feat)
 
     global_feat_expand = tf.tile(global_feat, [1, num_point, 1, 1])
-    concat_feat = tf.concat(3, [point_feat, global_feat_expand])
+    concat_feat = tf.concat([point_feat, global_feat_expand], 3)
     print(concat_feat)
 
     net = tf_util.conv2d(concat_feat, 512, [1,1],
@@ -81,7 +82,7 @@ def get_model(point_cloud, is_training, bn_decay=None):
                          bn=True, is_training=is_training,
                          scope='conv9', bn_decay=bn_decay)
 
-    net = tf_util.conv2d(net, 50, [1,1],
+    net = tf_util.conv2d(net, 2, [1,1],
                          padding='VALID', stride=[1,1], activation_fn=None,
                          scope='conv10')
     net = tf.squeeze(net, [2]) # BxNxC
@@ -89,12 +90,13 @@ def get_model(point_cloud, is_training, bn_decay=None):
     return net, end_points
 
 
-def get_loss(pred, label, end_points, reg_weight=0.001):
+def get_loss(pred, label, mask, end_points, reg_weight=0.001):
     """ pred: BxNxC,
         label: BxN, """
-    loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=pred, labels=label)
-    classify_loss = tf.reduce_mean(loss)
-    tf.scalar_summary('classify loss', classify_loss)
+    print label, mask
+    loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=pred, labels=label) * mask
+    classify_loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
+    tf.summary.scalar('classify loss', classify_loss)
 
     # Enforce the transformation as orthogonal matrix
     transform = end_points['transform'] # BxKxK
@@ -102,7 +104,7 @@ def get_loss(pred, label, end_points, reg_weight=0.001):
     mat_diff = tf.matmul(transform, tf.transpose(transform, perm=[0,2,1]))
     mat_diff -= tf.constant(np.eye(K), dtype=tf.float32)
     mat_diff_loss = tf.nn.l2_loss(mat_diff) 
-    tf.scalar_summary('mat_loss', mat_diff_loss)
+    tf.summary.scalar('mat_loss', mat_diff_loss)
 
     return classify_loss + mat_diff_loss * reg_weight
 
